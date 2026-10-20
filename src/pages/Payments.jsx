@@ -1,8 +1,8 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { getPaymentAnalytics, getPaymentSessions, getLocations, updateSession, getPatientLedger } from '../lib/api'
+import { getPaymentAnalytics, getPaymentSessions, getLocations, updateSession, getPatientLedger, getLabSummary } from '../lib/api'
 import { useToast } from '../hooks/useToast'
-import { CheckCircle, Search, ArrowDownLeft, IndianRupee, MapPin, Calendar } from 'lucide-react'
+import { CheckCircle, Search, ArrowDownLeft, IndianRupee, MapPin, Calendar, FlaskConical, Pencil } from 'lucide-react'
 import { format } from 'date-fns'
 
 function fmt(n){ return Number(n||0).toLocaleString('en-IN') }
@@ -18,6 +18,7 @@ export default function Payments(){
   const navigate=useNavigate()
   const {showToast}=useToast()
   const [analytics,setAnalytics]=useState(null)
+  const [labSpent,setLabSpent]=useState(0)
   const [sessions,setSessions]=useState([])
   const [total,setTotal]=useState(0)
   const [loading,setLoading]=useState(true)
@@ -62,11 +63,15 @@ export default function Payments(){
   const load = useCallback(async ()=>{
     setLoading(true)
     try{
-      const [a, s] = await Promise.all([
+      const [a, s, labSummary] = await Promise.all([
         getPaymentAnalytics({from,to, location_id: locationId}),
         getPaymentSessions({from,to, location_id: locationId, status, search, limit:100}),
+        // Same calculation as the Laboratory page: all-time sum of lab order costs
+        getLabSummary().catch(()=>[]),
       ])
       setAnalytics(a)
+      const labRows = Array.isArray(labSummary) ? labSummary : labSummary?.data ?? []
+      setLabSpent(labRows.reduce((sum, l) => sum + Number(l.total_cost||0), 0))
       const rows = Array.isArray(s.rows)?s.rows: Array.isArray(s)?s: s.rows||[]
       setSessions(rows)
       setTotal(s.total ?? rows.length)
@@ -100,6 +105,21 @@ export default function Payments(){
     }catch(e){ showToast(e.message,'error')}
   }
 
+  const saveNote = async (s, note)=>{
+    const nextNotes = note || null
+    if ((s.notes || null) === nextNotes) return
+    // Optimistic update so the UI reflects the change immediately
+    setSessions(rows=> rows.map(r=> r.id===s.id ? {...r, notes: nextNotes} : r))
+    setSelectedSession(cur=> cur && cur.id===s.id ? {...cur, notes: nextNotes} : cur)
+    try{
+      await updateSession(s.id, { notes: nextNotes })
+      showToast('Note saved','success')
+    }catch(e){
+      setSessions(rows=> rows.map(r=> r.id===s.id ? {...r, notes: s.notes ?? null} : r))
+      showToast(e.message,'error')
+    }
+  }
+
   const activePeriodLabel = datePreset==='custom' ? `${fmtDate(from)} - ${fmtDate(to)}` : datePreset==='today' ? fmtDate(from) : `${fmtDate(from)} - ${fmtDate(to)}`
 
   return (
@@ -111,11 +131,16 @@ export default function Payments(){
 
       {/* Summary cards - patient-focused: Incoming, Total Paid, Pending, Partial, Outstanding */}
       {analytics ? (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
           <div className="rounded-xl border bg-white p-4">
             <p className="flex items-center gap-1 text-xs font-medium uppercase text-slate-500"><ArrowDownLeft className="h-3 w-3 text-emerald-600"/> Incoming</p>
             <p className="mt-1 text-lg font-bold text-emerald-700" title="Money received from patients in selected period">₹{fmt(analytics.incomingThisMonth)}</p>
             <p className="text-xs text-slate-400">This period</p>
+          </div>
+          <div className="rounded-xl border bg-white p-4">
+            <p className="flex items-center gap-1 text-xs font-medium uppercase text-slate-500"><FlaskConical className="h-3 w-3 text-indigo-600"/> Total Lab Spent</p>
+            <p className="mt-1 text-lg font-bold text-indigo-700" title="Total cost of all lab orders (all time)">₹{fmt(labSpent)}</p>
+            <p className="text-xs text-slate-400">All time</p>
           </div>
           <div className="rounded-xl border bg-white p-4">
             <p className="text-xs font-medium uppercase text-slate-500">Total Paid</p>
@@ -138,7 +163,7 @@ export default function Payments(){
             <p className="text-xs text-slate-500">{analytics.counts.sessions} sessions · {analytics.counts.patients} patients</p>
           </div>
         </div>
-      ) : <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">{Array.from({length:5}).map((_,i)=><div key={i} className="h-24 animate-pulse rounded-xl bg-slate-100"/> )}</div>}
+      ) : <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">{Array.from({length:6}).map((_,i)=><div key={i} className="h-24 animate-pulse rounded-xl bg-slate-100"/> )}</div>}
 
       {/* Filters */}
       <div className="rounded-xl border bg-white p-4">
@@ -215,6 +240,7 @@ export default function Payments(){
                     <th className="px-4 py-3 text-right">Paid</th>
                     <th className="px-4 py-3 text-right">Outstanding</th>
                     <th className="px-4 py-3">Status</th>
+                    <th className="px-4 py-3">Notes</th>
                     <th className="px-4 py-3"></th>
                   </tr>
                 </thead>
@@ -233,6 +259,7 @@ export default function Payments(){
                         <td className="px-4 py-3 text-right text-emerald-700">₹{fmt(s.amount_paid)}</td>
                         <td className="px-4 py-3 text-right font-bold text-rose-600">₹{fmt(due)}</td>
                         <td className="px-4 py-3"><span className={`rounded-full px-2 py-0.5 text-xs font-medium ring-1 ${statusStyle[s.payment_status]}`}>{s.payment_status}</span></td>
+                        <td className="px-4 py-3"><NotesCell session={s} onSave={saveNote} /></td>
                         <td className="px-4 py-3" onClick={e=>e.stopPropagation()}>
                           {s.payment_status!=='Paid' && <button onClick={()=>markAsPaid(s)} className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700">Mark Paid</button>}
                         </td>
@@ -259,6 +286,9 @@ export default function Payments(){
                       <div><p className="text-xs text-slate-500">Total</p><p className="font-semibold">₹{fmt(s.treatment_cost)}</p></div>
                       <div><p className="text-xs text-slate-500">Paid</p><p className="font-semibold text-emerald-700">₹{fmt(s.amount_paid)}</p></div>
                       <div><p className="text-xs text-slate-500">Due</p><p className="font-bold text-rose-600">₹{fmt(due)}</p></div>
+                    </div>
+                    <div className="mt-3 border-t pt-2">
+                      <NotesCell session={s} onSave={saveNote} />
                     </div>
                     {s.payment_status!=='Paid' && <button onClick={(e)=>{e.stopPropagation(); markAsPaid(s)}} className="mt-3 w-full rounded-lg bg-emerald-600 py-2 text-sm font-medium text-white">Mark Paid</button>}
                   </div>
@@ -310,5 +340,58 @@ export default function Payments(){
         </div>
       )}
     </main>
+  )
+}
+
+function NotesCell({ session, onSave }) {
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState(session.notes || '')
+  const [saving, setSaving] = useState(false)
+  const inFlight = useRef(false)
+
+  const commit = async () => {
+    if (inFlight.current) return
+    inFlight.current = true
+    setEditing(false)
+    setSaving(true)
+    try {
+      await onSave(session, value.trim())
+    } finally {
+      inFlight.current = false
+      setSaving(false)
+    }
+  }
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); setValue(session.notes || ''); setEditing(true) }}
+        className="group flex max-w-[200px] items-start gap-1 text-left text-xs text-slate-600 hover:text-teal-700"
+        title="Edit note"
+        disabled={saving}
+      >
+        <span className="line-clamp-2">{session.notes || <span className="text-slate-400">Add note</span>}</span>
+        <Pencil className="mt-0.5 h-3 w-3 shrink-0 text-slate-400 group-hover:text-teal-600" />
+      </button>
+    )
+  }
+
+  return (
+    <div className="flex max-w-[220px] items-center gap-1" onClick={(e) => e.stopPropagation()}>
+      <input
+        autoFocus
+        value={value}
+        disabled={saving}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') commit()
+          if (e.key === 'Escape') { setValue(session.notes || ''); setEditing(false) }
+        }}
+        onBlur={commit}
+        placeholder="Add note..."
+        className="w-full rounded border border-slate-300 px-2 py-1 text-xs focus:border-teal-500 focus:outline-none"
+      />
+    </div>
   )
 }

@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { ArrowLeft, FlaskConical, Search, Users, Package } from 'lucide-react'
+import { ArrowLeft, FlaskConical, Search, Users, Package, CheckCircle, Loader2 } from 'lucide-react'
 import { format } from 'date-fns'
-import { getLabDetail } from '../lib/api'
+import { getLabDetail, markLabOrderPaid } from '../lib/api'
+import { useToast } from '../hooks/useToast'
 
 function formatMoney(v) { return Number(v || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 }) }
 function formatDate(d) {
@@ -19,6 +20,7 @@ const statusColor = {
 export default function LabDetail() {
   const { labId } = useParams()
   const navigate = useNavigate()
+  const { showToast } = useToast()
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -46,6 +48,18 @@ export default function LabDetail() {
   const handleSearch = (e) => {
     e.preventDefault()
     load()
+  }
+
+  const [payingId, setPayingId] = useState('')
+  const markOrderPaid = async (o) => {
+    const name = o.patient_name || 'this patient'
+    if (!window.confirm(`Mark "${o.test_name}" for ${name} as fully paid (₹${formatMoney(o.cost)})?`)) return
+    setPayingId(o.id)
+    try {
+      await markLabOrderPaid(o.id)
+      showToast('Lab order marked as paid', 'success')
+      await load()
+    } catch (e) { showToast(e.message, 'error') } finally { setPayingId('') }
   }
 
   if (loading) return <div className="flex h-64 items-center justify-center text-gray-400">Loading lab...</div>
@@ -159,6 +173,7 @@ export default function LabDetail() {
                   <th className="px-4 py-3 text-right">Outstanding</th>
                   <th className="px-4 py-3">Status</th>
                   <th className="px-4 py-3">Notes</th>
+                  <th className="px-4 py-3"></th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -180,6 +195,19 @@ export default function LabDetail() {
                       <span className={`rounded-full px-2 py-0.5 text-xs font-medium ring-1 ${statusColor[o.status] || 'bg-slate-50 text-slate-600'}`}>{o.status || 'Ordered'}</span>
                     </td>
                     <td className="max-w-[150px] truncate px-4 py-3 text-xs text-slate-500">{o.notes || '-'}</td>
+                    <td className="px-4 py-3 text-right">
+                      {Number(o.outstanding) > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => markOrderPaid(o)}
+                          disabled={payingId === o.id}
+                          className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-60"
+                        >
+                          {payingId === o.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle className="h-3.5 w-3.5" />}
+                          Mark as Paid
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>

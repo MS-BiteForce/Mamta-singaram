@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { FlaskConical, Search, Users, Package, AlertCircle, Plus } from 'lucide-react'
-import { getLabSummary, getLabOrders, createLabVendor, updateLabVendor, getPatients, getSessions, createLabOrder } from '../lib/api'
+import { FlaskConical, Search, Users, Package, AlertCircle, Plus, CheckCircle, Loader2 } from 'lucide-react'
+import { getLabSummary, getLabOrders, createLabVendor, updateLabVendor, getPatients, getSessions, createLabOrder, markLabOrderPaid } from '../lib/api'
 import { useToast } from '../hooks/useToast'
 
 function formatMoney(v) {
@@ -36,6 +36,22 @@ export default function Labs() {
     const rows = data?.rows || (Array.isArray(data)?data:[])
     setOrders(rows)
     setOrdersTotal(data?.total || rows.length)
+  }
+
+  const [payingId, setPayingId] = useState('')
+  const markOrderPaid = async (o) => {
+    const name = o.patient_name || 'this patient'
+    if (!window.confirm(`Mark "${o.test_name}" for ${name} as fully paid (₹${formatMoney(o.cost)})?`)) return
+    setPayingId(o.id)
+    try {
+      await markLabOrderPaid(o.id)
+      showToast('Lab order marked as paid', 'success')
+      await Promise.all([loadLabs(), loadOrders()])
+    } catch (e) {
+      showToast(e.message, 'error')
+    } finally {
+      setPayingId('')
+    }
   }
 
   useEffect(() => {
@@ -291,7 +307,7 @@ export default function Labs() {
           <div className="overflow-x-auto">
             <table className="w-full text-left text-sm">
               <thead className="bg-slate-50 text-xs uppercase text-slate-500"><tr>
-                <th className="px-4 py-3">Patient</th><th className="px-4 py-3">Lab</th><th className="px-4 py-3">Product</th><th className="px-4 py-3">Order Date</th><th className="px-4 py-3">Required</th><th className="px-4 py-3 text-right">Cost</th><th className="px-4 py-3 text-right">Paid</th><th className="px-4 py-3 text-right">Outstanding</th><th className="px-4 py-3">Status</th>
+                <th className="px-4 py-3">Patient</th><th className="px-4 py-3">Lab</th><th className="px-4 py-3">Product</th><th className="px-4 py-3">Order Date</th><th className="px-4 py-3">Required</th><th className="px-4 py-3 text-right">Cost</th><th className="px-4 py-3 text-right">Paid</th><th className="px-4 py-3 text-right">Outstanding</th><th className="px-4 py-3">Status</th><th className="px-4 py-3"></th>
               </tr></thead>
               <tbody className="divide-y">
                 {orders.map(o=> (
@@ -305,6 +321,19 @@ export default function Labs() {
                     <td className="px-4 py-3 text-right text-emerald-600">₹{formatMoney(o.amount_paid)}</td>
                     <td className={`px-4 py-3 text-right font-medium ${o.outstanding>0?'text-rose-600':'text-slate-400'}`}>₹{formatMoney(o.outstanding)}</td>
                     <td className="px-4 py-3"><span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs">{o.status}</span></td>
+                    <td className="px-4 py-3 text-right">
+                      {Number(o.outstanding) > 0 && (
+                        <button
+                          type="button"
+                          onClick={()=>markOrderPaid(o)}
+                          disabled={payingId===o.id}
+                          className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-60"
+                        >
+                          {payingId===o.id ? <Loader2 className="h-3.5 w-3.5 animate-spin"/> : <CheckCircle className="h-3.5 w-3.5"/>}
+                          Mark as Paid
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>

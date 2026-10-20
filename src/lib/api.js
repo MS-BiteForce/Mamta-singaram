@@ -224,6 +224,7 @@ export function deleteSessionConsentForm(sessionId, id) { return request(`/api/s
 // Lab Management Portal
 export function getLabSummary() { return request('/api/labs/summary') }
 export function getLabOrders(filters={}){ const p=new URLSearchParams(); if(filters.lab_vendor_id) p.set('lab_vendor_id',filters.lab_vendor_id); if(filters.patient_search) p.set('patient_search',filters.patient_search); if(filters.status) p.set('status',filters.status); if(filters.from) p.set('from',filters.from); if(filters.to) p.set('to',filters.to); if(filters.limit) p.set('limit',String(filters.limit)); if(filters.offset) p.set('offset',String(filters.offset)); const qs=p.toString()?`?${p}`:''; return request(`/api/labs/orders${qs}`) }
+export function markLabOrderPaid(id) { return request(`/api/labs/orders/${id}/pay`, { method: 'PUT' }) }
 export function createLabOrder(data){ return request('/api/labs/orders',{method:'POST', body:JSON.stringify(data)}) }
 export function getLabDetail(labId, filters = {}) {
   const p = new URLSearchParams()

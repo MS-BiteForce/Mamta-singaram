@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { format, addDays } from 'date-fns'
 import {
   Calendar,
   Clock,
@@ -8,7 +9,8 @@ import {
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useToast } from '../hooks/useToast'
-import { getPatients, getPatient, getSessions } from '../lib/api'
+import { getPatients, getSessions, getAppointments } from '../lib/api'
+import { formatTime12 } from '../components/AppointmentDayTimeline'
 
 const initialStats = {
   totalPatients: 0,
@@ -31,32 +33,40 @@ function Dashboard() {
       setLoading(true)
 
       try {
-        const today = new Date().toISOString().split('T')[0]
-        const monthStart = new Date(
-          new Date().getFullYear(),
-          new Date().getMonth(),
-          1,
-        )
-          .toISOString()
-          .split('T')[0]
-        const nextWeek = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
-          .toISOString()
-          .split('T')[0]
+        // Local-timezone-safe date strings (toISOString() would shift in IST)
+        const today = format(new Date(), 'yyyy-MM-dd')
+        const next7 = format(addDays(new Date(), 7), 'yyyy-MM-dd')
+        // Widen the server-side window by +1 day to absorb the UTC serialization
+        // offset of pg DATE values (local midnight → T18:30:00.000Z in IST);
+        // the exact 7-day cut is applied client-side via string compare, same
+        // pattern as the Appointments page sidebar.
+        const fetchTo = format(addDays(new Date(), 8), 'yyyy-MM-dd')
+        const monthStart = format(new Date(new Date().getFullYear(), new Date().getMonth(), 1), 'yyyy-MM-dd')
 
         // 1. Total patients & recent patients — from single getPatients call
-        const allPatients = await getPatients()
-        const totalPatients = allPatients.length
-
         // 2. Sessions this month — backend filter on visit_date
-        const monthSessions = await getSessions({ visit_date_from: monthStart })
+        // 3. Upcoming appointments — same source of truth as the Appointments page: `appointments` table
+        const [allPatients, monthSessions, weekAppointmentsRes] = await Promise.all([
+          getPatients(),
+          getSessions({ visit_date_from: monthStart }),
+          getAppointments({ date_from: today, date_to: fetchTo }),
+        ])
+        const totalPatients = allPatients.length
         const sessionsThisMonth = monthSessions.length
+        const weekAppointments = Array.isArray(weekAppointmentsRes)
+          ? weekAppointmentsRes
+          : weekAppointmentsRes?.data ?? weekAppointmentsRes?.rows ?? []
 
-        // 3. All sessions — used to derive today's appointments and upcoming
-        //    Backend getSessions filters on visit_date, not next_visit_date, so filter client side
-        const allSessions = await getSessions()
-        const todayAppointments = allSessions.filter(
-          (s) => normalizeDateValue(s.next_visit_date) === today,
-        ).length
+        const patientMap = {}
+        allPatients.forEach((p) => { patientMap[p.id] = p })
+
+        // Normalize + sort chronologically (soonest first), same as Appointments.jsx sidebar
+        const upcoming = weekAppointments
+          .map((a) => ({ ...a, dateKey: String(a.appointment_date).split('T')[0], patient_name: patientMap[a.patient_id]?.full_name || '' }))
+          .filter((a) => a.dateKey >= today && a.dateKey <= next7)
+          .sort((a, b) => a.dateKey.localeCompare(b.dateKey) || String(a.appointment_time || '').localeCompare(String(b.appointment_time || '')))
+
+        const todayAppointments = upcoming.filter((a) => a.dateKey === today).length
 
         // 4. Pending dues — two queries merged
         const [pending, partial] = await Promise.all([
@@ -69,39 +79,7 @@ function Dashboard() {
           0,
         )
 
-        // 5. Upcoming appointments — filter next_visit_date between today and nextWeek, sort, limit 10
-        const upcoming = allSessions
-          .filter((s) => {
-            const nvd = normalizeDateValue(s.next_visit_date)
-            return nvd && nvd >= today && nvd <= nextWeek
-          })
-          .sort((a, b) => normalizeDateValue(a.next_visit_date).localeCompare(normalizeDateValue(b.next_visit_date)))
-          .slice(0, 10)
-
-        // 6. Batch patient lookup via getPatient per id
-        const patientIds = [...new Set(upcoming.map((s) => s.patient_id).filter(Boolean))]
-        const patientResults = await Promise.all(
-          patientIds.map((id) => getPatient(id).catch(() => null)),
-        )
-        const patientMap = {}
-        patientResults.forEach((p) => {
-          if (p && p.id) patientMap[p.id] = p
-          else if (p && p.patient_id) patientMap[p.id || p.patient_id] = p
-        })
-        // Fallback: some APIs return patient with id field, ensure map keyed correctly
-        // Re-map using requested ids order if response id differs
-        patientIds.forEach((id, idx) => {
-          const res = patientResults[idx]
-          if (res && !patientMap[id] && res.id) {
-            patientMap[id] = res
-          }
-        })
-        const upcomingWithPatients = upcoming.map((session) => {
-          const patient = patientMap[session.patient_id] || null
-          return { ...session, patient, patients: patient }
-        })
-
-        // 7. Recent patients — sort by created_at desc, limit 5
+        // 5. Recent patients — sort by created_at desc, limit 5
         const recentPatients = [...allPatients]
           .sort((a, b) => toMillis(b.created_at) - toMillis(a.created_at))
           .slice(0, 5)
@@ -114,7 +92,7 @@ function Dashboard() {
           pendingAmount,
         })
         setRecentPatients(recentPatients)
-        setUpcomingAppointments(upcomingWithPatients)
+        setUpcomingAppointments(upcoming)
       } catch (error) {
         showToast(error.message || 'Unable to load dashboard.', 'error')
       } finally {
@@ -204,18 +182,21 @@ function Dashboard() {
                 >
                   <div className="min-w-0">
                     <p className="truncate text-sm font-medium text-slate-800">
-                      {appointment.patients?.full_name || 'Patient'}
+                      {appointment.appointment_time
+                        ? `${formatTime12(appointment.appointment_time)} — `
+                        : ''}
+                      {appointment.patient_name || appointment.patients?.full_name || 'Patient'}
                     </p>
                     <p className="mt-0.5 truncate text-xs text-slate-400">
-                      {appointment.chief_complaint || '-'}
+                      {appointment.title || appointment.chief_complaint || '-'}
                     </p>
                   </div>
                   <div className="shrink-0 text-right">
                     <p className="text-xs font-semibold text-purple-600">
-                      {formatDate(appointment.next_visit_date)}
+                      {format(new Date(`${appointment.dateKey}T00:00:00`), 'EEE, dd MMM')}
                     </p>
                     <p className="text-xs text-slate-400">
-                      {appointment.patients?.phone || '-'}
+                      {appointment.location_name || appointment.patients?.phone || '-'}
                     </p>
                   </div>
                 </button>
@@ -300,11 +281,6 @@ function formatDate(dateValue) {
   const d = toDate(dateValue)
   if (!d) return '—'
   return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })
-}
-
-function normalizeDateValue(dateValue) {
-  if (!dateValue) return ''
-  return String(dateValue).split('T')[0]
 }
 
 function toDate(dateValue) {

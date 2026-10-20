@@ -150,6 +150,21 @@ router.post('/orders', async (req, res) => {
   }
 })
 
+// PUT /api/labs/orders/:id/pay - settle an outstanding lab order
+router.put('/orders/:id/pay', async (req, res) => {
+  try {
+    const r = await pool.query(
+      `UPDATE lab_entries SET amount_paid = cost WHERE id = $1 RETURNING *`,
+      [req.params.id]
+    )
+    if (!r.rows.length) return res.status(404).json({ error: 'Lab order not found' })
+    const row = r.rows[0]
+    res.json({ ...row, outstanding: Number(row.cost || 0) - Number(row.amount_paid || 0) })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 // GET /api/labs/:labVendorId - detail for single lab with orders + financials
 router.get('/:labVendorId', async (req, res) => {
   try {
