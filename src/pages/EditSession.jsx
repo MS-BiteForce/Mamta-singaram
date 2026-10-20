@@ -885,13 +885,12 @@ function EditSession() {
                 />
               </label>
               <label className="block text-sm text-gray-600">
-                Next Visit Date <span className="text-rose-600">*</span>
+                Next Visit Date
                 <input
                   type="date"
                   value={nextVisitDate}
                   onChange={(event) => setNextVisitDate(event.target.value)}
                   className="mt-1 w-full rounded border px-3 py-2"
-                  required
                 />
               </label>
             </div>

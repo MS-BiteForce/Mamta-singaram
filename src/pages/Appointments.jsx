@@ -1,10 +1,11 @@
-import { useEffect, useState, useMemo } from 'react'
+import { useEffect, useState, useMemo, useCallback } from 'react'
 import { format, startOfMonth, endOfMonth, addMonths, subMonths, startOfWeek, endOfWeek, addDays } from 'date-fns'
 import { Calendar, Plus, Search, X, Loader2, UserPlus } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useToast } from '../hooks/useToast'
 import { getAppointments, createAppointment, updateAppointment, deleteAppointment, getPatients, createPatient } from '../lib/api'
 import { getLocations, createLocation } from '../lib/api'
+import { isPastDate, isPastTimeSlot } from '../lib/appointmentTime'
 import AppointmentCalendar from '../components/AppointmentCalendar'
 import AppointmentDetailModal from '../components/AppointmentDetailModal'
 import AppointmentDayTimeline, { formatTime12 } from '../components/AppointmentDayTimeline'
@@ -30,6 +31,17 @@ export default function Appointments(){
   const [quickCreate,setQuickCreate]=useState(false)
   const [quickForm,setQuickForm]=useState({ full_name:'', phone:'' })
   const [quickSaving,setQuickSaving]=useState(false)
+  const [upcoming,setUpcoming]=useState([])
+
+  const todayStr = format(new Date(), 'yyyy-MM-dd')
+  const selectedDateKey = format(selectedDate, 'yyyy-MM-dd')
+  const selectedIsPast = isPastDate(selectedDateKey)
+
+  // Booking guard: block past dates entirely; on today, block passed time slots
+  const canBookSlot = useCallback((date, time='09:00') => {
+    const key = format(date, 'yyyy-MM-dd')
+    return !isPastTimeSlot(key, time)
+  }, [])
 
   const load = async (date=currentDate, v=view)=>{
     setLoading(true)
@@ -38,22 +50,30 @@ export default function Appointments(){
       if(v==='today'){ start=end=format(date,'yyyy-MM-dd') }
       else if(v==='week'){ start=format(startOfWeek(date,{weekStartsOn:1}),'yyyy-MM-dd'); end=format(endOfWeek(date,{weekStartsOn:1}),'yyyy-MM-dd') }
       else { start=format(startOfMonth(date),'yyyy-MM-dd'); end=format(endOfMonth(date),'yyyy-MM-dd') }
-      const data=await getAppointments({ date_from:start, date_to:end })
+      const [data, up] = await Promise.all([
+        getAppointments({ date_from:start, date_to:end }),
+        getAppointments({ date_from: todayStr, date_to: format(addDays(new Date(),10),'yyyy-MM-dd') })
+      ])
       const arr=Array.isArray(data)?data: data?.data ?? data?.rows ?? []
       setAppointments(arr)
+      const uarr=Array.isArray(up)?up: up?.data ?? up?.rows ?? []
+      setUpcoming(uarr)
     }catch(e){ showToast(e.message,'error')}
     finally{ setLoading(false)}
   }
 
   // eslint-disable-next-line react-hooks/set-state-in-effect, react-hooks/exhaustive-deps
   useEffect(()=>{ load(currentDate, view) },[currentDate, view])
-  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(()=>{
     getPatients().then(d=> setPatients(Array.isArray(d)?d: d?.data ?? [])).catch(()=>{})
   },[])
 
   const openCreate = (date, time) => {
     const d = date ? format(date,'yyyy-MM-dd') : format(selectedDate,'yyyy-MM-dd')
+    if (isPastDate(d) || isPastTimeSlot(d, time || '09:00')) {
+      showToast('Cannot book appointments in the past.', 'warning')
+      return
+    }
     setForm({ patient_id:'', appointment_date:d, appointment_time: time || '', title:'', notes:'', location_id:'', status:'Scheduled' })
     setPatientSearch('')
     setQuickCreate(false)
@@ -94,6 +114,7 @@ export default function Appointments(){
     e.preventDefault()
     if(!form.patient_id) return showToast('Patient is required','warning')
     if(!form.appointment_date) return showToast('Date is required','warning')
+    if(isPastDate(form.appointment_date) || isPastTimeSlot(form.appointment_date, form.appointment_time || '09:00')) return showToast('Cannot book appointments in the past.','warning')
     setSaving(true)
     try{
       await createAppointment(form)
@@ -120,6 +141,23 @@ export default function Appointments(){
   const patientMap = useMemo(()=>{ const m={}; patients.forEach(p=> m[p.id]=p.full_name); return m },[patients])
   const enriched = useMemo(()=> appointments.map(a=> ({...a, patient_name: patientMap[a.patient_id] || ''})), [appointments, patientMap])
 
+  // Upcoming appointments grouped by date (today -> +10 days)
+  const upcomingGroups = useMemo(()=>{
+    const startKey = format(new Date(),'yyyy-MM-dd')
+    const endKey = format(addDays(new Date(),10),'yyyy-MM-dd')
+    const list = upcoming
+      .map(a=> ({...a, patient_name: patientMap[a.patient_id] || '', dateKey: String(a.appointment_date).split('T')[0]}))
+      .filter(a=> a.dateKey>=startKey && a.dateKey<=endKey)
+      .sort((a,b)=> a.dateKey.localeCompare(b.dateKey) || String(a.appointment_time||'').localeCompare(String(b.appointment_time||'')))
+    const groups=[]
+    list.forEach(a=>{
+      const last=groups[groups.length-1]
+      if(last && last.key===a.dateKey) last.items.push(a)
+      else groups.push({ key:a.dateKey, label:format(new Date(a.dateKey+'T00:00:00'),'EEE, dd MMM'), items:[a] })
+    })
+    return groups
+  },[upcoming, patientMap])
+
   return (
     <div className="mx-auto max-w-7xl space-y-6">
       {/* Header */}
@@ -128,7 +166,11 @@ export default function Appointments(){
           <h1 className="text-2xl font-bold text-slate-900">Appointments</h1>
           <p className="mt-1 text-sm text-slate-500">Today · Week · Month — click a slot to book</p>
         </div>
-        <button type="button" onClick={()=>openCreate(selectedDate,'')} className="inline-flex flex-wrap items-center gap-2 rounded-md bg-teal-600 px-4 py-2 text-sm font-medium text-white hover:bg-teal-700"><Plus className="h-4 w-4"/> New Appointment</button>
+        {selectedIsPast ? (
+          <span className="inline-flex items-center gap-2 rounded-md bg-slate-100 px-4 py-2 text-sm font-medium text-slate-400 cursor-not-allowed"><Plus className="h-4 w-4"/> New Appointment</span>
+        ) : (
+          <button type="button" onClick={()=>openCreate(selectedDate,'')} className="inline-flex flex-wrap items-center gap-2 rounded-md bg-teal-600 px-4 py-2 text-sm font-medium text-white hover:bg-teal-700"><Plus className="h-4 w-4"/> New Appointment</button>
+        )}
       </div>
 
       {/* View toggle */}
@@ -179,7 +221,9 @@ export default function Appointments(){
                   {filteredSearch.length===0 ? (
                     <div className="py-8 text-center text-sm text-slate-500">
                       <Calendar className="mx-auto mb-2 h-6 w-6 text-slate-300"/>No appointments on this date
-                      <button type="button" onClick={()=>openCreate(selectedDate,'09:00')} className="mt-3 block w-full rounded-lg border border-dashed py-2 text-sm text-teal-600 hover:bg-teal-50">+ Book 9:00 AM</button>
+                      {!selectedIsPast && (
+                        <button type="button" onClick={()=>openCreate(selectedDate,'09:00')} className="mt-3 block w-full rounded-lg border border-dashed py-2 text-sm text-teal-600 hover:bg-teal-50">+ Book 9:00 AM</button>
+                      )}
                     </div>
                   ) : filteredSearch.map(a=>(
                     <button key={a.id} type="button" onClick={()=>setSelectedAppt(a)} className="w-full rounded-lg border p-3 text-left hover:bg-slate-50">
@@ -189,14 +233,37 @@ export default function Appointments(){
                     </button>
                   ))}
                 </div>
+
+                {/* ── Upcoming (Next 10 Days) ─────────────────────────────── */}
+                <div className="mt-4 border-t pt-4">
+                  <h4 className="mb-2 text-sm font-semibold text-slate-900">Upcoming (Next 10 Days)</h4>
+                  {upcomingGroups.length===0 ? (
+                    <p className="py-4 text-center text-xs text-slate-400">No upcoming appointments</p>
+                  ) : (
+                    <div className="space-y-3 max-h-[40vh] overflow-y-auto pr-1">
+                      {upcomingGroups.map(group=> (
+                        <div key={group.key}>
+                          <p className="sticky top-0 z-10 bg-white text-xs font-semibold text-teal-700 py-1">{group.label}</p>
+                          <div className="space-y-1">
+                            {group.items.map(a=> (
+                              <button key={a.id} type="button" onClick={()=>{ setSelectedDate(new Date(group.key+'T00:00:00')); setCurrentDate(new Date(group.key+'T00:00:00')) }} className="w-full rounded-md border border-slate-100 bg-slate-50 px-2.5 py-1.5 text-left text-xs text-slate-700 hover:border-teal-300 hover:bg-teal-50">
+                                <span className="font-medium">{a.appointment_time ? formatTime12(a.appointment_time) : 'No time'}</span> — {a.patient_name || 'Walk-in'}{a.title ? ` (${a.title})` : ''}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           )}
           {view==='week' && (
-            <AppointmentWeekView currentDate={currentDate} appointments={enriched} onAppointmentClick={setSelectedAppt} onSlotClick={handleSlotClick} selectedDate={selectedDate} />
+            <AppointmentWeekView currentDate={currentDate} appointments={enriched} onAppointmentClick={setSelectedAppt} onSlotClick={handleSlotClick} selectedDate={selectedDate} canBookSlot={canBookSlot} />
           )}
           {view==='today' && (
-            <AppointmentDayTimeline date={currentDate} appointments={enriched.filter(a=> String(a.appointment_date).split('T')[0]===format(currentDate,'yyyy-MM-dd'))} onAppointmentClick={setSelectedAppt} onSlotClick={handleSlotClick} />
+            <AppointmentDayTimeline date={currentDate} appointments={enriched.filter(a=> String(a.appointment_date).split('T')[0]===format(currentDate,'yyyy-MM-dd'))} onAppointmentClick={setSelectedAppt} onSlotClick={handleSlotClick} canBookSlot={canBookSlot} />
           )}
         </>
       )}
@@ -210,7 +277,7 @@ export default function Appointments(){
               <button type="button" onClick={()=>setShowDayDetail(null)} className="rounded p-1 hover:bg-slate-100"><X className="h-5 w-5"/></button>
             </div>
             <div className="p-4">
-              <AppointmentDayTimeline date={showDayDetail} appointments={enriched.filter(a=> String(a.appointment_date).split('T')[0]===format(showDayDetail,'yyyy-MM-dd'))} onAppointmentClick={(a)=>{ setShowDayDetail(null); setSelectedAppt(a)}} onSlotClick={(d,t)=>{ setShowDayDetail(null); handleSlotClick(d,t)}} />
+              <AppointmentDayTimeline date={showDayDetail} appointments={enriched.filter(a=> String(a.appointment_date).split('T')[0]===format(showDayDetail,'yyyy-MM-dd'))} onAppointmentClick={(a)=>{ setShowDayDetail(null); setSelectedAppt(a)}} onSlotClick={(d,t)=>{ setShowDayDetail(null); handleSlotClick(d,t)}} canBookSlot={canBookSlot} />
             </div>
           </div>
         </div>
@@ -259,7 +326,7 @@ export default function Appointments(){
             </div>
 
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <label className="block text-sm">Date *<input type="date" value={form.appointment_date} onChange={e=>setForm({...form, appointment_date:e.target.value})} className="mt-1 w-full rounded border px-3 py-2 text-sm" required/></label>
+              <label className="block text-sm">Date *<input type="date" min={format(new Date(),'yyyy-MM-dd')} value={form.appointment_date} onChange={e=>setForm({...form, appointment_date:e.target.value})} className="mt-1 w-full rounded border px-3 py-2 text-sm" required/></label>
               <label className="block text-sm">Time <span className="text-xs text-slate-400">({form.appointment_time ? formatTime12(form.appointment_time):'—'})</span><input type="time" value={form.appointment_time} onChange={e=>setForm({...form, appointment_time:e.target.value})} step="900" className="mt-1 w-full rounded border px-3 py-2 text-sm"/></label>
             </div>
             <label className="block text-sm">Title<input value={form.title} onChange={e=>setForm({...form, title:e.target.value})} placeholder="Follow-up, Cleaning..." className="mt-1 w-full rounded border px-3 py-2 text-sm"/></label>

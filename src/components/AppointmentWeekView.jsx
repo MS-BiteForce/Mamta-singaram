@@ -3,7 +3,7 @@ import { formatTime12 } from './AppointmentDayTimeline'
 
 
 
-export default function AppointmentWeekView({ currentDate, appointments = [], onAppointmentClick, onSlotClick, selectedDate }) {
+export default function AppointmentWeekView({ currentDate, appointments = [], onAppointmentClick, onSlotClick, selectedDate, canBookSlot }) {
   const weekStart = startOfWeek(currentDate, { weekStartsOn: 1 })
   const days = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i))
   const hours = []
@@ -67,9 +67,11 @@ export default function AppointmentWeekView({ currentDate, appointments = [], on
                           {a.appointment_time ? formatTime12(a.appointment_time).replace(':00 ', ' ') + ' ' : ''}{a.title || 'Appt'}
                         </button>
                       ))}
-                      <button type="button" onClick={() => onSlotClick(d, `${String(h).padStart(2, '0')}:00`)} className="flex w-full rounded border border-dashed py-1.5 text-[10px] justify-center text-slate-300 hover:border-teal-300 hover:text-teal-500 group-hover:block sm:block">
-                        +
-                      </button>
+                      {(!canBookSlot || canBookSlot(d, `${String(h).padStart(2, '0')}:00`)) && (
+                        <button type="button" onClick={() => onSlotClick(d, `${String(h).padStart(2, '0')}:00`)} className="flex w-full rounded border border-dashed py-1.5 text-[10px] justify-center text-slate-300 hover:border-teal-300 hover:text-teal-500 group-hover:block sm:block">
+                          +
+                        </button>
+                      )}
                     </div>
                   </div>
                 )

@@ -26,7 +26,7 @@ function timeToMinutes(t) {
   return h * 60 + (m || 0)
 }
 
-export default function AppointmentDayTimeline({ date, appointments = [], onAppointmentClick, onSlotClick }) {
+export default function AppointmentDayTimeline({ date, appointments = [], onAppointmentClick, onSlotClick, canBookSlot }) {
   const hours = []
   for (let h = 0; h < 24; h++) {
     const ampm = h >= 12 ? 'PM' : 'AM'
@@ -73,13 +73,15 @@ export default function AppointmentDayTimeline({ date, appointments = [], onAppo
                       <span className="shrink-0 text-xs font-medium">{a.appointment_time ? formatTime12(a.appointment_time) : 'No time'}</span>
                     </button>
                   ))}
-                  <button
-                    type="button"
-                    onClick={() => onSlotClick && onSlotClick(date, `${String(h).padStart(2, '0')}:00`)}
-                    className="w-full rounded border border-dashed border-slate-200 py-2 text-xs text-slate-400 hover:border-teal-300 hover:text-teal-600"
-                  >
-                    + Book {label}
-                  </button>
+                  {(!canBookSlot || canBookSlot(date, `${String(h).padStart(2, '0')}:00`)) && (
+                    <button
+                      type="button"
+                      onClick={() => onSlotClick && onSlotClick(date, `${String(h).padStart(2, '0')}:00`)}
+                      className="w-full rounded border border-dashed border-slate-200 py-2 text-xs text-slate-400 hover:border-teal-300 hover:text-teal-600"
+                    >
+                      + Book {label}
+                    </button>
+                  )}
                 </div>
               </div>
             </div>

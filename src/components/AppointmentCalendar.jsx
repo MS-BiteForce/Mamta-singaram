@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import { format, startOfMonth, endOfMonth, startOfWeek, endOfWeek, addDays, addMonths, subMonths, isSameMonth, isSameDay } from 'date-fns'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
+import { isPastDate } from '../lib/appointmentTime'
 
 const statusColor = {
   Scheduled: 'bg-blue-500',
@@ -59,12 +60,15 @@ export default function AppointmentCalendar({ appointments = [], currentMonth, o
           const isCurrentMonth = isSameMonth(day, currentMonth)
           const isSelected = selectedDate && isSameDay(day, selectedDate)
           const isToday = isSameDay(day, new Date())
+          const dayKey = format(day, 'yyyy-MM-dd')
+          const isDisabled = isPastDate(dayKey)
           return (
             <button
               key={key}
               type="button"
+              disabled={isDisabled}
               onClick={() => onSelectDate(new Date(day))}
-              className={`relative flex min-h-[72px] flex-col rounded-lg border p-1.5 text-left transition ${isSelected ? 'border-teal-500 bg-teal-50' : 'border-slate-100 bg-white hover:bg-slate-50'} ${!isCurrentMonth ? 'opacity-40' : ''} ${isToday ? 'ring-1 ring-teal-300' : ''}`}
+              className={`relative flex min-h-[72px] flex-col rounded-lg border p-1.5 text-left transition ${isSelected ? 'border-teal-500 bg-teal-50' : 'border-slate-100 bg-white hover:bg-slate-50'} ${!isCurrentMonth ? 'opacity-40' : ''} ${isToday ? 'ring-1 ring-teal-300' : ''} ${isDisabled ? 'cursor-not-allowed opacity-50 hover:bg-white' : ''}`}
             >
               <span className={`text-xs font-medium ${isSelected ? 'text-teal-700' : 'text-slate-700'}`}>{format(day,'d')}</span>
               <div className="mt-1 space-y-1">
