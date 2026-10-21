@@ -17,7 +17,7 @@ import {
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { CONSULTATION_FORMS } from '../lib/consultationForms'
-import { getLabEntries } from '../lib/api'
+import { getLabEntries, getSurgeryNotes } from '../lib/api'
 
 const visitTypeStyles = {
   New: 'bg-blue-50 text-blue-700 ring-blue-200',
@@ -37,6 +37,7 @@ function SessionCard({ session, followupSession, onEdit, onDeleteFile }) {
   const [showTreatment, setShowTreatment] = useState(false)
   const [viewConsultationForm, setViewConsultationForm] = useState(null)
   const [labEntries, setLabEntries] = useState([])
+  const [surgeryNotes, setSurgeryNotes] = useState('')
   const doctors = session.doctors || []
   const files = session.files || session.session_files || []
   const consultationForms = session.consultationForms || session.consultation_forms || []
@@ -51,6 +52,18 @@ function SessionCard({ session, followupSession, onEdit, onDeleteFile }) {
         setLabEntries(arr)
       })
       .catch(() => setLabEntries([]))
+  }, [session.id])
+
+  // Surgery notes live in their own per-session record (read-only fetch)
+  useEffect(() => {
+    if (!session.id) return
+    getSurgeryNotes(session.id)
+      .then(data => {
+        const record = data?.data ?? data?.surgery_notes ?? data
+        const text = typeof record === 'string' ? record : record?.notes
+        setSurgeryNotes(text ? String(text).trim() : '')
+      })
+      .catch(() => setSurgeryNotes(''))
   }, [session.id])
 
   const handleEdit = () => {
@@ -162,6 +175,9 @@ function SessionCard({ session, followupSession, onEdit, onDeleteFile }) {
             )}
           </div>
         )}
+
+        <CollapsibleField label="Notes" text={session.notes} />
+        <CollapsibleField label="Surgery Notes" text={surgeryNotes} />
 
         {doctors.length > 0 && (
           <div className="flex flex-wrap gap-2">
@@ -394,6 +410,34 @@ function SessionCard({ session, followupSession, onEdit, onDeleteFile }) {
         )}
       </div>
     </article>
+  )
+}
+
+function CollapsibleField({ label, text }) {
+  const [expanded, setExpanded] = useState(false)
+  const value = (text || '').trim()
+  if (!value) return null
+  const isLong = value.length > 140
+  return (
+    <div>
+      <p className={`text-sm leading-6 text-slate-600 ${expanded ? '' : 'line-clamp-2'}`}>
+        <span className="font-medium text-slate-800">{label}:</span> {value}
+      </p>
+      {isLong && (
+        <button
+          type="button"
+          onClick={() => setExpanded((current) => !current)}
+          className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-teal-700 hover:text-teal-800"
+        >
+          {expanded ? 'Show less' : 'Show more'}
+          {expanded ? (
+            <ChevronUp className="h-3.5 w-3.5" />
+          ) : (
+            <ChevronDown className="h-3.5 w-3.5" />
+          )}
+        </button>
+      )}
+    </div>
   )
 }
 
