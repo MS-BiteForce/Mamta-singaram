@@ -6,6 +6,8 @@ import {
   IndianRupee,
   TrendingUp,
   Users,
+  UserX,
+  XCircle,
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useToast } from '../hooks/useToast'
@@ -20,6 +22,13 @@ const initialStats = {
   pendingAmount: 0,
 }
 
+const appointmentStatusStyles = {
+  Scheduled: 'bg-blue-50 text-blue-700 ring-blue-200',
+  Completed: 'bg-emerald-50 text-emerald-700 ring-emerald-200',
+  Cancelled: 'bg-slate-100 text-slate-600 ring-slate-200',
+  'No-Show': 'bg-rose-50 text-rose-700 ring-rose-200',
+}
+
 function Dashboard() {
   const navigate = useNavigate()
   const { showToast } = useToast()
@@ -27,6 +36,10 @@ function Dashboard() {
   const [recentPatients, setRecentPatients] = useState([])
   const [upcomingAppointments, setUpcomingAppointments] = useState([])
   const [loading, setLoading] = useState(true)
+  // Appointment tracking metrics (Cancelled / No-Show), scoped by period
+  const [metricsPeriod, setMetricsPeriod] = useState('year') // 'month' | 'year'
+  const [apptMetrics, setApptMetrics] = useState({ cancelled: 0, noShow: 0, total: 0 })
+  const [todayBreakdown, setTodayBreakdown] = useState({ scheduled: 0, cancelled: 0, noShow: 0 })
 
   useEffect(() => {
     const loadDashboard = async () => {
@@ -46,16 +59,21 @@ function Dashboard() {
         // 1. Total patients & recent patients — from single getPatients call
         // 2. Sessions this month — backend filter on visit_date
         // 3. Upcoming appointments — same source of truth as the Appointments page: `appointments` table
-        const [allPatients, monthSessions, weekAppointmentsRes] = await Promise.all([
+        // 4. Today's appointments — strict same-day server filter (all statuses)
+        const [allPatients, monthSessions, weekAppointmentsRes, todayAppointmentsRes] = await Promise.all([
           getPatients(),
           getSessions({ visit_date_from: monthStart }),
           getAppointments({ date_from: today, date_to: fetchTo }),
+          getAppointments({ date_from: today, date_to: today }),
         ])
         const totalPatients = allPatients.length
         const sessionsThisMonth = monthSessions.length
         const weekAppointments = Array.isArray(weekAppointmentsRes)
           ? weekAppointmentsRes
           : weekAppointmentsRes?.data ?? weekAppointmentsRes?.rows ?? []
+        const todayRows = Array.isArray(todayAppointmentsRes)
+          ? todayAppointmentsRes
+          : todayAppointmentsRes?.data ?? todayAppointmentsRes?.rows ?? []
 
         const patientMap = {}
         allPatients.forEach((p) => { patientMap[p.id] = p })
@@ -66,7 +84,12 @@ function Dashboard() {
           .filter((a) => a.dateKey >= today && a.dateKey <= next7)
           .sort((a, b) => a.dateKey.localeCompare(b.dateKey) || String(a.appointment_time || '').localeCompare(String(b.appointment_time || '')))
 
-        const todayAppointments = upcoming.filter((a) => a.dateKey === today).length
+        const todayAppointments = todayRows.length
+        setTodayBreakdown({
+          scheduled: todayRows.filter((a) => a.status === 'Scheduled').length,
+          cancelled: todayRows.filter((a) => a.status === 'Cancelled').length,
+          noShow: todayRows.filter((a) => a.status === 'No-Show').length,
+        })
 
         // 4. Pending dues — two queries merged
         const [pending, partial] = await Promise.all([
@@ -103,11 +126,39 @@ function Dashboard() {
     Promise.resolve().then(loadDashboard)
   }, [showToast])
 
+  // Cancelled / No-Show metrics for the selected period (safe YYYY-MM-DD comparisons)
+  useEffect(() => {
+    let active = true
+    const loadMetrics = async () => {
+      try {
+        const now = new Date()
+        const start = metricsPeriod === 'month'
+          ? format(new Date(now.getFullYear(), now.getMonth(), 1), 'yyyy-MM-dd')
+          : format(new Date(now.getFullYear(), 0, 1), 'yyyy-MM-dd')
+        const end = metricsPeriod === 'month'
+          ? format(new Date(now.getFullYear(), now.getMonth() + 1, 0), 'yyyy-MM-dd')
+          : format(new Date(now.getFullYear(), 11, 31), 'yyyy-MM-dd')
+        const res = await getAppointments({ date_from: start, date_to: end })
+        if (!active) return
+        const rows = Array.isArray(res) ? res : res?.data ?? res?.rows ?? []
+        setApptMetrics({
+          cancelled: rows.filter((a) => a.status === 'Cancelled').length,
+          noShow: rows.filter((a) => a.status === 'No-Show').length,
+          total: rows.length,
+        })
+      } catch {
+        if (active) setApptMetrics({ cancelled: 0, noShow: 0, total: 0 })
+      }
+    }
+    Promise.resolve().then(loadMetrics)
+    return () => { active = false }
+  }, [metricsPeriod])
+
   if (loading) {
     return (
       <div className="mx-auto max-w-6xl p-2 sm:p-6">
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {Array.from({ length: 4 }).map((_, index) => (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {Array.from({ length: 6 }).map((_, index) => (
             <div key={index} className="h-28 animate-pulse rounded-xl bg-slate-100" />
           ))}
         </div>
@@ -131,7 +182,25 @@ function Dashboard() {
         </p>
       </header>
 
-      <section className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="mb-3 flex flex-wrap items-center justify-end gap-2">
+        <span className="text-xs font-medium text-slate-500">Appointment metrics:</span>
+        {[['month', 'This Month'], ['year', 'YTD']].map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            onClick={() => setMetricsPeriod(value)}
+            className={`rounded-md border px-2.5 py-1 text-xs font-medium transition ${
+              metricsPeriod === value
+                ? 'border-teal-600 bg-teal-600 text-white'
+                : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      <section className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <StatCard
           icon={Users}
           label="Total Patients"
@@ -148,6 +217,7 @@ function Dashboard() {
           icon={Calendar}
           label="Today's Appointments"
           value={stats.todayAppointments}
+          detail={`${todayBreakdown.scheduled} Scheduled · ${todayBreakdown.cancelled} Cancelled · ${todayBreakdown.noShow} No-Show`}
           className="border-purple-100 bg-purple-50 text-purple-700"
         />
         <StatCard
@@ -156,6 +226,20 @@ function Dashboard() {
           value={`₹${stats.pendingAmount.toLocaleString('en-IN')}`}
           detail={`${stats.pendingPayments} sessions`}
           className="border-red-100 bg-red-50 text-red-700"
+        />
+        <StatCard
+          icon={XCircle}
+          label={`Cancellations (${metricsPeriod === 'month' ? 'This Month' : 'YTD'})`}
+          value={apptMetrics.cancelled}
+          detail={`${apptMetrics.total} total appointments`}
+          className="border-rose-100 bg-rose-50 text-rose-700"
+        />
+        <StatCard
+          icon={UserX}
+          label={`No-Shows (${metricsPeriod === 'month' ? 'This Month' : 'YTD'})`}
+          value={apptMetrics.noShow}
+          detail={`${apptMetrics.total} total appointments`}
+          className="border-amber-100 bg-amber-50 text-amber-700"
         />
       </section>
 
@@ -173,34 +257,43 @@ function Dashboard() {
             <EmptyState icon={Calendar} message="No upcoming appointments" />
           ) : (
             <div className="space-y-3">
-              {upcomingAppointments.map((appointment) => (
-                <button
-                  key={appointment.id}
-                  type="button"
-                  onClick={() => navigate(`/patients/${appointment.patient_id}`)}
-                  className="flex w-full items-center justify-between gap-4 rounded-lg border border-slate-100 p-3 text-left transition hover:bg-slate-50"
-                >
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-medium text-slate-800">
-                      {appointment.appointment_time
-                        ? `${formatTime12(appointment.appointment_time)} — `
-                        : ''}
-                      {appointment.patient_name || appointment.patients?.full_name || 'Patient'}
-                    </p>
-                    <p className="mt-0.5 truncate text-xs text-slate-400">
-                      {appointment.title || appointment.chief_complaint || '-'}
-                    </p>
-                  </div>
-                  <div className="shrink-0 text-right">
-                    <p className="text-xs font-semibold text-purple-600">
-                      {format(new Date(`${appointment.dateKey}T00:00:00`), 'EEE, dd MMM')}
-                    </p>
-                    <p className="text-xs text-slate-400">
-                      {appointment.location_name || appointment.patients?.phone || '-'}
-                    </p>
-                  </div>
-                </button>
-              ))}
+              {upcomingAppointments.map((appointment) => {
+                const status = appointment.status || 'Scheduled'
+                const isInactive = status === 'Cancelled' || status === 'No-Show'
+                return (
+                  <button
+                    key={appointment.id}
+                    type="button"
+                    onClick={() => navigate(`/patients/${appointment.patient_id}`)}
+                    className={`flex w-full items-center justify-between gap-4 rounded-lg border border-slate-100 p-3 text-left transition hover:bg-slate-50 ${isInactive ? 'opacity-70' : ''}`}
+                  >
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className={`truncate text-sm font-medium ${isInactive ? 'text-slate-500 line-through' : 'text-slate-800'}`}>
+                          {appointment.appointment_time
+                            ? `${formatTime12(appointment.appointment_time)} — `
+                            : ''}
+                          {appointment.patient_name || appointment.patients?.full_name || 'Patient'}
+                        </p>
+                        <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ring-1 ${appointmentStatusStyles[status] || 'bg-slate-100 text-slate-600 ring-slate-200'}`}>
+                          {status}
+                        </span>
+                      </div>
+                      <p className="mt-0.5 truncate text-xs text-slate-400">
+                        {appointment.title || appointment.chief_complaint || '-'}
+                      </p>
+                    </div>
+                    <div className="shrink-0 text-right">
+                      <p className="text-xs font-semibold text-purple-600">
+                        {format(new Date(`${appointment.dateKey}T00:00:00`), 'EEE, dd MMM')}
+                      </p>
+                      <p className="text-xs text-slate-400">
+                        {appointment.location_name || appointment.patients?.phone || '-'}
+                      </p>
+                    </div>
+                  </button>
+                )
+              })}
             </div>
           )}
         </div>
