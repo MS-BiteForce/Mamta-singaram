@@ -1,7 +1,19 @@
-import { useEffect, useState } from 'react'
-import { format, addDays } from 'date-fns'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import {
+  addDays,
+  endOfMonth,
+  endOfWeek,
+  endOfYear,
+  format,
+  startOfMonth,
+  startOfWeek,
+  startOfYear,
+  subDays,
+} from 'date-fns'
 import {
   Calendar,
+  Check,
+  ChevronDown,
   Clock,
   IndianRupee,
   TrendingUp,
@@ -16,7 +28,7 @@ import { formatTime12 } from '../components/AppointmentDayTimeline'
 
 const initialStats = {
   totalPatients: 0,
-  sessionsThisMonth: 0,
+  sessions: 0,
   todayAppointments: 0,
   pendingPayments: 0,
   pendingAmount: 0,
@@ -29,188 +41,353 @@ const appointmentStatusStyles = {
   'No-Show': 'bg-rose-50 text-rose-700 ring-rose-200',
 }
 
+const DATE_PRESETS = [
+  { value: 'today', label: 'Today' },
+  { value: 'yesterday', label: 'Yesterday' },
+  { value: 'week', label: 'This Week' },
+  { value: 'month', label: 'This Month' },
+  { value: 'year', label: 'This Year' },
+  { value: 'ytd', label: 'Year to Date (YTD)' },
+  { value: 'all', label: 'All Time' },
+  { value: 'custom', label: 'Custom Range' },
+]
+
 function Dashboard() {
   const navigate = useNavigate()
   const { showToast } = useToast()
   const [stats, setStats] = useState(initialStats)
   const [recentPatients, setRecentPatients] = useState([])
   const [upcomingAppointments, setUpcomingAppointments] = useState([])
-  const [loading, setLoading] = useState(true)
-  // Appointment tracking metrics (Cancelled / No-Show), scoped by period
-  const [metricsPeriod, setMetricsPeriod] = useState('year') // 'month' | 'year'
   const [apptMetrics, setApptMetrics] = useState({ cancelled: 0, noShow: 0, total: 0 })
   const [todayBreakdown, setTodayBreakdown] = useState({ scheduled: 0, cancelled: 0, noShow: 0 })
+  const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
+
+  // Date range filter
+  const [filterPreset, setFilterPreset] = useState('ytd')
+  const [appliedCustom, setAppliedCustom] = useState({ start: '', end: '' })
+  const [customStart, setCustomStart] = useState('')
+  const [customEnd, setCustomEnd] = useState('')
+  const [filterOpen, setFilterOpen] = useState(false)
+  const [showCustom, setShowCustom] = useState(false)
+
+  const loadedRef = useRef(false)
+
+  // All presets resolve to safe YYYY-MM-DD strings (never toISOString())
+  const range = useMemo(() => {
+    const now = new Date()
+    const key = (d) => format(d, 'yyyy-MM-dd')
+    switch (filterPreset) {
+      case 'today':
+        return { start: key(now), end: key(now), label: 'Today' }
+      case 'yesterday': {
+        const yesterday = subDays(now, 1)
+        return { start: key(yesterday), end: key(yesterday), label: 'Yesterday' }
+      }
+      case 'week':
+        return {
+          start: key(startOfWeek(now, { weekStartsOn: 1 })),
+          end: key(endOfWeek(now, { weekStartsOn: 1 })),
+          label: 'This Week',
+        }
+      case 'month':
+        return { start: key(startOfMonth(now)), end: key(endOfMonth(now)), label: 'This Month' }
+      case 'year':
+        return { start: key(startOfYear(now)), end: key(endOfYear(now)), label: 'This Year' }
+      case 'all':
+        return { start: null, end: null, label: 'All Time' }
+      case 'custom':
+        return {
+          start: appliedCustom.start,
+          end: appliedCustom.end,
+          label: `${shortDate(appliedCustom.start)} – ${shortDate(appliedCustom.end)}`,
+        }
+      case 'ytd':
+      default:
+        return { start: key(startOfYear(now)), end: key(now), label: 'Year to Date' }
+    }
+  }, [filterPreset, appliedCustom])
 
   useEffect(() => {
+    let active = true
+
     const loadDashboard = async () => {
-      setLoading(true)
+      if (!loadedRef.current) setLoading(true)
+      else setRefreshing(true)
 
       try {
-        // Local-timezone-safe date strings (toISOString() would shift in IST)
         const today = format(new Date(), 'yyyy-MM-dd')
         const next7 = format(addDays(new Date(), 7), 'yyyy-MM-dd')
-        // Widen the server-side window by +1 day to absorb the UTC serialization
-        // offset of pg DATE values (local midnight → T18:30:00.000Z in IST);
-        // the exact 7-day cut is applied client-side via string compare, same
-        // pattern as the Appointments page sidebar.
-        const fetchTo = format(addDays(new Date(), 8), 'yyyy-MM-dd')
-        const monthStart = format(new Date(new Date().getFullYear(), new Date().getMonth(), 1), 'yyyy-MM-dd')
 
-        // 1. Total patients & recent patients — from single getPatients call
-        // 2. Sessions this month — backend filter on visit_date
-        // 3. Upcoming appointments — same source of truth as the Appointments page: `appointments` table
-        // 4. Today's appointments — strict same-day server filter (all statuses)
-        const [allPatients, monthSessions, weekAppointmentsRes, todayAppointmentsRes] = await Promise.all([
+        // Ranges are compared against DATE columns server-side (exact string
+        // comparison), which avoids the pg DATE → UTC serialization offset.
+        const sessionFilters = range.start
+          ? { visit_date_from: range.start, visit_date_to: range.end }
+          : {}
+        const appointmentFilters = range.start
+          ? { date_from: range.start, date_to: range.end }
+          : {}
+
+        const [
+          patientsRes,
+          rangeSessionsRes,
+          rangeAppointmentsRes,
+          todayAppointmentsRes,
+          upcomingRes,
+        ] = await Promise.all([
           getPatients(),
-          getSessions({ visit_date_from: monthStart }),
-          getAppointments({ date_from: today, date_to: fetchTo }),
+          getSessions(sessionFilters),
+          getAppointments(appointmentFilters),
           getAppointments({ date_from: today, date_to: today }),
+          getAppointments({ date_from: today, date_to: next7 }),
         ])
-        const totalPatients = allPatients.length
-        const sessionsThisMonth = monthSessions.length
-        const weekAppointments = Array.isArray(weekAppointmentsRes)
-          ? weekAppointmentsRes
-          : weekAppointmentsRes?.data ?? weekAppointmentsRes?.rows ?? []
-        const todayRows = Array.isArray(todayAppointmentsRes)
-          ? todayAppointmentsRes
-          : todayAppointmentsRes?.data ?? todayAppointmentsRes?.rows ?? []
+
+        if (!active) return
+
+        const allPatients = asArray(patientsRes)
+        const rangeSessions = asArray(rangeSessionsRes)
+        const rangeAppointments = asArray(rangeAppointmentsRes)
+        const todayRows = asArray(todayAppointmentsRes)
+        const upcomingRows = asArray(upcomingRes)
+
+        // Patients: created_at is a timestamp, so a local YYYY-MM-DD key is safe
+        const patientsInRange = range.start
+          ? allPatients.filter((p) => {
+              const key = localDateKey(p.created_at)
+              return key && key >= range.start && key <= range.end
+            })
+          : allPatients
+
+        const pendingSessions = rangeSessions.filter(
+          (s) => s.payment_status === 'Pending' || s.payment_status === 'Partial',
+        )
 
         const patientMap = {}
-        allPatients.forEach((p) => { patientMap[p.id] = p })
+        allPatients.forEach((p) => {
+          patientMap[p.id] = p
+        })
 
-        // Normalize + sort chronologically (soonest first), same as Appointments.jsx sidebar
-        const upcoming = weekAppointments
-          .map((a) => ({ ...a, dateKey: String(a.appointment_date).split('T')[0], patient_name: patientMap[a.patient_id]?.full_name || '' }))
-          .filter((a) => a.dateKey >= today && a.dateKey <= next7)
-          .sort((a, b) => a.dateKey.localeCompare(b.dateKey) || String(a.appointment_time || '').localeCompare(String(b.appointment_time || '')))
+        // Today (inclusive) through the next 7 days — strictly chronological
+        const upcoming = upcomingRows
+          .map((a) => ({
+            ...a,
+            dateKey: toDateKey(a.appointment_date),
+            patient_name: patientMap[a.patient_id]?.full_name || '',
+          }))
+          .filter((a) => a.dateKey && a.dateKey >= today && a.dateKey <= next7)
+          .sort(
+            (a, b) =>
+              a.dateKey.localeCompare(b.dateKey) ||
+              String(a.appointment_time || '').localeCompare(String(b.appointment_time || '')),
+          )
 
-        const todayAppointments = todayRows.length
+        setStats({
+          totalPatients: patientsInRange.length,
+          sessions: rangeSessions.length,
+          todayAppointments: todayRows.length,
+          pendingPayments: pendingSessions.length,
+          pendingAmount: pendingSessions.reduce(
+            (sum, s) => sum + Number(s.treatment_cost || 0) - Number(s.amount_paid || 0),
+            0,
+          ),
+        })
+        setApptMetrics({
+          cancelled: rangeAppointments.filter((a) => a.status === 'Cancelled').length,
+          noShow: rangeAppointments.filter((a) => a.status === 'No-Show').length,
+          total: rangeAppointments.length,
+        })
         setTodayBreakdown({
           scheduled: todayRows.filter((a) => a.status === 'Scheduled').length,
           cancelled: todayRows.filter((a) => a.status === 'Cancelled').length,
           noShow: todayRows.filter((a) => a.status === 'No-Show').length,
         })
-
-        // 4. Pending dues — two queries merged
-        const [pending, partial] = await Promise.all([
-          getSessions({ payment_status: 'Pending' }),
-          getSessions({ payment_status: 'Partial' }),
-        ])
-        const pendingSessions = [...pending, ...partial]
-        const pendingAmount = pendingSessions.reduce(
-          (sum, s) => sum + Number(s.treatment_cost || 0) - Number(s.amount_paid || 0),
-          0,
+        setRecentPatients(
+          [...allPatients]
+            .sort((a, b) => toMillis(b.created_at) - toMillis(a.created_at))
+            .slice(0, 5),
         )
-
-        // 5. Recent patients — sort by created_at desc, limit 5
-        const recentPatients = [...allPatients]
-          .sort((a, b) => toMillis(b.created_at) - toMillis(a.created_at))
-          .slice(0, 5)
-
-        setStats({
-          totalPatients,
-          sessionsThisMonth,
-          todayAppointments,
-          pendingPayments: pendingSessions.length,
-          pendingAmount,
-        })
-        setRecentPatients(recentPatients)
         setUpcomingAppointments(upcoming)
+        loadedRef.current = true
       } catch (error) {
-        showToast(error.message || 'Unable to load dashboard.', 'error')
+        if (active) showToast(error.message || 'Unable to load dashboard.', 'error')
       } finally {
-        setLoading(false)
+        if (active) {
+          setLoading(false)
+          setRefreshing(false)
+        }
       }
     }
 
-    Promise.resolve().then(loadDashboard)
-  }, [showToast])
-
-  // Cancelled / No-Show metrics for the selected period (safe YYYY-MM-DD comparisons)
-  useEffect(() => {
-    let active = true
-    const loadMetrics = async () => {
-      try {
-        const now = new Date()
-        const start = metricsPeriod === 'month'
-          ? format(new Date(now.getFullYear(), now.getMonth(), 1), 'yyyy-MM-dd')
-          : format(new Date(now.getFullYear(), 0, 1), 'yyyy-MM-dd')
-        const end = metricsPeriod === 'month'
-          ? format(new Date(now.getFullYear(), now.getMonth() + 1, 0), 'yyyy-MM-dd')
-          : format(new Date(now.getFullYear(), 11, 31), 'yyyy-MM-dd')
-        const res = await getAppointments({ date_from: start, date_to: end })
-        if (!active) return
-        const rows = Array.isArray(res) ? res : res?.data ?? res?.rows ?? []
-        setApptMetrics({
-          cancelled: rows.filter((a) => a.status === 'Cancelled').length,
-          noShow: rows.filter((a) => a.status === 'No-Show').length,
-          total: rows.length,
-        })
-      } catch {
-        if (active) setApptMetrics({ cancelled: 0, noShow: 0, total: 0 })
-      }
+    loadDashboard()
+    return () => {
+      active = false
     }
-    Promise.resolve().then(loadMetrics)
-    return () => { active = false }
-  }, [metricsPeriod])
+  }, [range, showToast])
+
+  const toggleFilter = () => {
+    setFilterOpen((prev) => {
+      const next = !prev
+      if (next) {
+        setShowCustom(filterPreset === 'custom')
+        setCustomStart(appliedCustom.start)
+        setCustomEnd(appliedCustom.end)
+      }
+      return next
+    })
+  }
+
+  const selectPreset = (value) => {
+    if (value === 'custom') {
+      setShowCustom(true)
+      return
+    }
+    setShowCustom(false)
+    setFilterPreset(value)
+    setFilterOpen(false)
+  }
+
+  const applyCustomRange = () => {
+    if (!customStart || !customEnd) {
+      showToast('Select both a start and end date.', 'warning')
+      return
+    }
+    if (customStart > customEnd) {
+      showToast('Start date cannot be after the end date.', 'warning')
+      return
+    }
+    setAppliedCustom({ start: customStart, end: customEnd })
+    setFilterPreset('custom')
+    setShowCustom(false)
+    setFilterOpen(false)
+  }
+
+  const filterSummary = range.start
+    ? `Showing data for ${range.label}`
+    : 'Showing data for all time'
 
   if (loading) {
     return (
-      <div className="mx-auto max-w-6xl p-2 sm:p-6">
+      <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+        <div className="mb-8 space-y-2">
+          <div className="h-8 w-48 animate-pulse rounded bg-slate-200" />
+          <div className="h-4 w-72 animate-pulse rounded bg-slate-100" />
+        </div>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 6 }).map((_, index) => (
             <div key={index} className="h-28 animate-pulse rounded-xl bg-slate-100" />
           ))}
         </div>
-      </div>
+      </main>
     )
   }
 
   return (
-    <main className="mx-auto max-w-6xl px-2 py-6 sm:px-6">
-      <header className="mb-6">
-        <h1 className="text-2xl font-bold tracking-normal text-slate-900">
-          Dashboard
-        </h1>
-        <p className="mt-1 text-sm text-slate-500">
-          {new Date().toLocaleDateString('en-IN', {
-            weekday: 'long',
-            day: 'numeric',
-            month: 'long',
-            year: 'numeric',
-          })}
-        </p>
-      </header>
+    <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+      <div className="mb-4 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h1 className="text-2xl font-bold tracking-normal text-slate-800">Dashboard</h1>
+          <p className="mt-1 text-sm text-slate-500">{filterSummary}</p>
+        </div>
 
-      <div className="mb-3 flex flex-wrap items-center justify-end gap-2">
-        <span className="text-xs font-medium text-slate-500">Appointment metrics:</span>
-        {[['month', 'This Month'], ['year', 'YTD']].map(([value, label]) => (
+        <div className="relative">
           <button
-            key={value}
             type="button"
-            onClick={() => setMetricsPeriod(value)}
-            className={`rounded-md border px-2.5 py-1 text-xs font-medium transition ${
-              metricsPeriod === value
-                ? 'border-teal-600 bg-teal-600 text-white'
-                : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
-            }`}
+            onClick={toggleFilter}
+            className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50"
           >
-            {label}
+            <Calendar className="h-4 w-4 text-teal-600" />
+            <span className="max-w-48 truncate">{range.label}</span>
+            <ChevronDown className={`h-4 w-4 text-slate-400 transition-transform ${filterOpen ? 'rotate-180' : ''}`} />
           </button>
-        ))}
+
+          {filterOpen && (
+            <>
+              <div className="fixed inset-0 z-10" onClick={() => setFilterOpen(false)} />
+              <div className="absolute right-0 z-20 mt-2 max-h-[70vh] w-72 overflow-y-auto rounded-xl border border-slate-200 bg-white p-2 shadow-lg">
+                <p className="px-3 pb-1 pt-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                  Date Range
+                </p>
+                <div className="max-h-64 overflow-y-auto">
+                  {DATE_PRESETS.map((preset) => (
+                    <button
+                      key={preset.value}
+                      type="button"
+                      onClick={() => selectPreset(preset.value)}
+                      className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition ${
+                        filterPreset === preset.value
+                          ? 'bg-teal-50 font-medium text-teal-700'
+                          : 'text-slate-600 hover:bg-slate-50'
+                      }`}
+                    >
+                      {preset.label}
+                      {filterPreset === preset.value && <Check className="h-4 w-4" />}
+                    </button>
+                  ))}
+                </div>
+
+                {showCustom && (
+                  <div className="mt-2 space-y-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                    <label className="block">
+                      <span className="mb-1 block text-xs font-medium text-slate-600">Start Date</span>
+                      <input
+                        type="date"
+                        value={customStart}
+                        max={customEnd || undefined}
+                        onChange={(event) => setCustomStart(event.target.value)}
+                        className="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-700 focus:border-teal-500 focus:outline-none"
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-xs font-medium text-slate-600">End Date</span>
+                      <input
+                        type="date"
+                        value={customEnd}
+                        min={customStart || undefined}
+                        onChange={(event) => setCustomEnd(event.target.value)}
+                        className="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-700 focus:border-teal-500 focus:outline-none"
+                      />
+                    </label>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={applyCustomRange}
+                        className="flex-1 rounded-lg bg-teal-600 px-3 py-1.5 text-sm font-medium text-white transition hover:bg-teal-700"
+                      >
+                        Apply
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowCustom(false)}
+                        className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-600 transition hover:bg-slate-100"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </div>
       </div>
 
-      <section className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <section
+        className={`mb-8 mt-4 grid grid-cols-1 gap-4 transition-opacity sm:grid-cols-2 lg:grid-cols-3 ${
+          refreshing ? 'opacity-60' : ''
+        }`}
+      >
         <StatCard
           icon={Users}
           label="Total Patients"
           value={stats.totalPatients}
+          detail={range.label}
           className="border-teal-100 bg-teal-50 text-teal-700"
         />
         <StatCard
           icon={TrendingUp}
-          label="Sessions This Month"
-          value={stats.sessionsThisMonth}
+          label="Sessions"
+          value={stats.sessions}
+          detail={range.label}
           className="border-blue-100 bg-blue-50 text-blue-700"
         />
         <StatCard
@@ -229,32 +406,38 @@ function Dashboard() {
         />
         <StatCard
           icon={XCircle}
-          label={`Cancellations (${metricsPeriod === 'month' ? 'This Month' : 'YTD'})`}
+          label="Cancellations"
           value={apptMetrics.cancelled}
-          detail={`${apptMetrics.total} total appointments`}
+          detail={`${apptMetrics.total} appointments in range`}
           className="border-rose-100 bg-rose-50 text-rose-700"
         />
         <StatCard
           icon={UserX}
-          label={`No-Shows (${metricsPeriod === 'month' ? 'This Month' : 'YTD'})`}
+          label="No-Shows"
           value={apptMetrics.noShow}
-          detail={`${apptMetrics.total} total appointments`}
+          detail={`${apptMetrics.total} appointments in range`}
           className="border-amber-100 bg-amber-50 text-amber-700"
         />
       </section>
 
-      <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+      <section className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+        <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm lg:col-span-2">
           <div className="mb-4 flex items-center justify-between">
             <h2 className="flex items-center gap-2 font-semibold tracking-normal text-slate-700">
               <Clock className="h-4 w-4 text-purple-500" />
               Upcoming Appointments
             </h2>
-            <span className="text-xs text-slate-400">Next 7 days</span>
+            <button
+              type="button"
+              onClick={() => navigate('/appointments')}
+              className="text-xs font-medium text-teal-600 hover:underline"
+            >
+              View all
+            </button>
           </div>
 
           {upcomingAppointments.length === 0 ? (
-            <EmptyState icon={Calendar} message="No upcoming appointments" />
+            <EmptyState icon={Clock} message="No upcoming appointments in the next 7 days" />
           ) : (
             <div className="space-y-3">
               {upcomingAppointments.map((appointment) => {
@@ -265,17 +448,27 @@ function Dashboard() {
                     key={appointment.id}
                     type="button"
                     onClick={() => navigate(`/patients/${appointment.patient_id}`)}
-                    className={`flex w-full items-center justify-between gap-4 rounded-lg border border-slate-100 p-3 text-left transition hover:bg-slate-50 ${isInactive ? 'opacity-70' : ''}`}
+                    className={`flex w-full items-center justify-between gap-4 rounded-lg border border-slate-100 p-3 text-left transition hover:bg-slate-50 ${
+                      isInactive ? 'opacity-70' : ''
+                    }`}
                   >
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
-                        <p className={`truncate text-sm font-medium ${isInactive ? 'text-slate-500 line-through' : 'text-slate-800'}`}>
+                        <p
+                          className={`truncate text-sm font-medium ${
+                            isInactive ? 'text-slate-500 line-through' : 'text-slate-800'
+                          }`}
+                        >
                           {appointment.appointment_time
                             ? `${formatTime12(appointment.appointment_time)} — `
                             : ''}
                           {appointment.patient_name || appointment.patients?.full_name || 'Patient'}
                         </p>
-                        <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ring-1 ${appointmentStatusStyles[status] || 'bg-slate-100 text-slate-600 ring-slate-200'}`}>
+                        <span
+                          className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ring-1 ${
+                            appointmentStatusStyles[status] || 'bg-slate-100 text-slate-600 ring-slate-200'
+                          }`}
+                        >
                           {status}
                         </span>
                       </div>
@@ -368,6 +561,40 @@ function EmptyState({ icon: Icon, message }) {
       <p className="text-sm text-slate-400">{message}</p>
     </div>
   )
+}
+
+function asArray(value) {
+  if (Array.isArray(value)) return value
+  return value?.data ?? value?.rows ?? []
+}
+
+// pg returns DATE columns as local midnight; JSON then serializes them in UTC,
+// which lands on the previous day for timezones ahead of UTC (e.g. IST).
+// Roll the date forward when the serialized UTC time is in the afternoon.
+function toDateKey(dateValue) {
+  if (!dateValue) return ''
+  const raw = String(dateValue)
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw
+  const d = new Date(raw)
+  if (isNaN(d.getTime())) return raw.slice(0, 10)
+  const isoDay = d.toISOString().slice(0, 10)
+  if (d.getUTCHours() >= 12) {
+    const rolled = new Date(`${isoDay}T00:00:00Z`)
+    rolled.setUTCDate(rolled.getUTCDate() + 1)
+    return rolled.toISOString().slice(0, 10)
+  }
+  return isoDay
+}
+
+function localDateKey(dateValue) {
+  const d = toDate(dateValue)
+  return d ? format(d, 'yyyy-MM-dd') : ''
+}
+
+function shortDate(dateString) {
+  if (!dateString) return '—'
+  const d = new Date(`${dateString}T00:00:00`)
+  return isNaN(d.getTime()) ? dateString : format(d, 'dd MMM yyyy')
 }
 
 function formatDate(dateValue) {
