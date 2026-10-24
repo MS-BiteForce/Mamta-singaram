@@ -72,6 +72,7 @@ function Dashboard() {
   const [showCustom, setShowCustom] = useState(false)
 
   const loadedRef = useRef(false)
+  const panelRef = useRef(null)
 
   // All presets resolve to safe YYYY-MM-DD strings (never toISOString())
   const range = useMemo(() => {
@@ -119,6 +120,13 @@ function Dashboard() {
         const today = format(new Date(), 'yyyy-MM-dd')
         const next7 = format(addDays(new Date(), 7), 'yyyy-MM-dd')
 
+        // A Custom Range also scopes the Upcoming widget, but it never shows
+        // appointments before today. Presets keep the fixed today → +7 window.
+        const customActive = filterPreset === 'custom' && Boolean(range.start && range.end)
+        const upcomingStart = customActive && range.start > today ? range.start : today
+        const upcomingEnd = customActive ? range.end : next7
+        const hasUpcomingWindow = upcomingStart <= upcomingEnd
+
         // Ranges are compared against DATE columns server-side (exact string
         // comparison), which avoids the pg DATE → UTC serialization offset.
         const sessionFilters = range.start
@@ -139,7 +147,9 @@ function Dashboard() {
           getSessions(sessionFilters),
           getAppointments(appointmentFilters),
           getAppointments({ date_from: today, date_to: today }),
-          getAppointments({ date_from: today, date_to: next7 }),
+          hasUpcomingWindow
+            ? getAppointments({ date_from: upcomingStart, date_to: upcomingEnd })
+            : Promise.resolve([]),
         ])
 
         if (!active) return
@@ -167,14 +177,14 @@ function Dashboard() {
           patientMap[p.id] = p
         })
 
-        // Today (inclusive) through the next 7 days — strictly chronological
+        // Strictly chronological, within the active upcoming window
         const upcoming = upcomingRows
           .map((a) => ({
             ...a,
             dateKey: toDateKey(a.appointment_date),
             patient_name: patientMap[a.patient_id]?.full_name || '',
           }))
-          .filter((a) => a.dateKey && a.dateKey >= today && a.dateKey <= next7)
+          .filter((a) => a.dateKey && a.dateKey >= upcomingStart && a.dateKey <= upcomingEnd)
           .sort(
             (a, b) =>
               a.dateKey.localeCompare(b.dateKey) ||
@@ -222,7 +232,24 @@ function Dashboard() {
     return () => {
       active = false
     }
-  }, [range, showToast])
+  }, [range, filterPreset, showToast])
+
+  // Keep the revealed date pickers in view inside the scrollable popover
+  useEffect(() => {
+    if (!filterOpen || !showCustom) return
+    const panel = panelRef.current
+    if (panel) panel.scrollTo({ top: panel.scrollHeight, behavior: 'smooth' })
+  }, [filterOpen, showCustom])
+
+  const closeFilter = () => {
+    // Clicking outside also applies a complete, valid custom range
+    if (showCustom && customStart && customEnd && customStart <= customEnd) {
+      setAppliedCustom({ start: customStart, end: customEnd })
+      setFilterPreset('custom')
+    }
+    setShowCustom(false)
+    setFilterOpen(false)
+  }
 
   const toggleFilter = () => {
     setFilterOpen((prev) => {
@@ -302,8 +329,11 @@ function Dashboard() {
 
           {filterOpen && (
             <>
-              <div className="fixed inset-0 z-10" onClick={() => setFilterOpen(false)} />
-              <div className="absolute right-0 z-20 mt-2 max-h-[70vh] w-72 overflow-y-auto rounded-xl border border-slate-200 bg-white p-2 shadow-lg">
+              <div className="fixed inset-0 z-10" onClick={closeFilter} />
+              <div
+                ref={panelRef}
+                className="absolute right-0 z-20 mt-2 max-h-[70vh] w-72 overflow-y-auto rounded-xl border border-slate-200 bg-white p-2 shadow-lg"
+              >
                 <p className="px-3 pb-1 pt-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
                   Date Range
                 </p>
@@ -334,7 +364,7 @@ function Dashboard() {
                         value={customStart}
                         max={customEnd || undefined}
                         onChange={(event) => setCustomStart(event.target.value)}
-                        className="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-700 focus:border-teal-500 focus:outline-none"
+                        className="w-full rounded-lg border border-slate-200 bg-white p-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-teal-500 [color-scheme:light]"
                       />
                     </label>
                     <label className="block">
@@ -344,7 +374,7 @@ function Dashboard() {
                         value={customEnd}
                         min={customStart || undefined}
                         onChange={(event) => setCustomEnd(event.target.value)}
-                        className="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-700 focus:border-teal-500 focus:outline-none"
+                        className="w-full rounded-lg border border-slate-200 bg-white p-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-teal-500 [color-scheme:light]"
                       />
                     </label>
                     <div className="flex gap-2">
@@ -437,7 +467,14 @@ function Dashboard() {
           </div>
 
           {upcomingAppointments.length === 0 ? (
-            <EmptyState icon={Clock} message="No upcoming appointments in the next 7 days" />
+            <EmptyState
+              icon={Clock}
+              message={
+                filterPreset === 'custom' && range.end && range.end < format(new Date(), 'yyyy-MM-dd')
+                  ? 'No upcoming appointments in the selected range'
+                  : 'No upcoming appointments in the next 7 days'
+              }
+            />
           ) : (
             <div className="space-y-3">
               {upcomingAppointments.map((appointment) => {
